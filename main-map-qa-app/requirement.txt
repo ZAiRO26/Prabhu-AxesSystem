@@ -5,3 +5,7 @@ matplotlib
 numpy
 python-multipart
 opencv-python
+scikit-learn
+openai
+overpy
+tenacity

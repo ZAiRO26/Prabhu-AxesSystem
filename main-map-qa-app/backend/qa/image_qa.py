@@ -525,6 +525,18 @@ async def run_image_qa(uploaded_file):
     errors.extend(isolation_forest_anomaly(features))
 
     # -------------------------------
+    # EDGE DENSITY CHECK (Rendering Failure Detection - NEW)
+    # -------------------------------
+    edge_density = features[0]  # First feature is edge_density
+    EDGE_DENSITY_THRESHOLD = 0.01  # 1% - Below this = likely blank/broken
+    if edge_density < EDGE_DENSITY_THRESHOLD:
+        errors.append({
+            "type": "rendering_failure",
+            "severity": 0.95,
+            "description": f"Extremely low edge density ({edge_density:.4f}). Map likely blank or failed to render."
+        })
+
+    # -------------------------------
     # HEURISTIC: Solid Patch Detection
     # -------------------------------
     patch_errors = detect_solid_patches(img)

@@ -335,10 +335,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import uuid
 import os
+from sklearn.ensemble import IsolationForest
 
-# --------------------------------------------------
-# Config
-# --------------------------------------------------
 # --------------------------------------------------
 # Config
 # --------------------------------------------------
@@ -348,6 +346,119 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 # Snap tolerance for connectivity (in map units)
 TOLERANCE = 0.5 
 MIN_LINE_LENGTH = 2.0
+Z_SCORE_THRESHOLD = 3.0  # Flag extreme outliers
+
+# --------------------------------------------------
+# ML Anomaly Detection (NEW)
+# --------------------------------------------------
+def detect_anomalies_isolation_forest(lines_data):
+    """
+    Use Isolation Forest to detect statistically anomalous geometries
+    based on length, sinuosity, and vertex count.
+    """
+    errors = []
+    if len(lines_data) < 5:  # Not enough data for meaningful ML
+        return errors
+    
+    # Extract features
+    features = []
+    valid_items = []
+    for item in lines_data:
+        geom = item["geom"]
+        if geom is None or geom.is_empty:
+            continue
+        
+        length = geom.length
+        if length == 0:
+            continue
+            
+        # Sinuosity: ratio of line length to straight-line distance between endpoints
+        try:
+            coords = list(geom.coords)
+            if len(coords) >= 2:
+                start = Point(coords[0])
+                end = Point(coords[-1])
+                straight_dist = start.distance(end)
+                sinuosity = length / straight_dist if straight_dist > 0 else 1.0
+            else:
+                sinuosity = 1.0
+        except:
+            sinuosity = 1.0
+        
+        vertex_count = len(list(geom.coords))
+        
+        features.append([length, sinuosity, vertex_count])
+        valid_items.append(item)
+    
+    if len(features) < 5:
+        return errors
+    
+    # Train Isolation Forest
+    X = np.array(features)
+    clf = IsolationForest(contamination=0.1, random_state=42, n_estimators=50)
+    predictions = clf.fit_predict(X)
+    
+    # -1 = outlier, 1 = normal
+    for i, pred in enumerate(predictions):
+        if pred == -1:
+            item = valid_items[i]
+            errors.append({
+                "id": f"ml-anomaly-{item['line_no']}",
+                "type": "ML Detected Anomaly",
+                "geometry_index": item["id"],
+                "line_number": item["line_no"],
+                "location": f"{item['geom'].centroid.x:.6f}, {item['geom'].centroid.y:.6f}",
+                "severity": "MEDIUM",
+                "description": f"Line {item['line_no']} has unusual characteristics (Length/Curvature outlier).",
+                "wkt": item["geom"].wkt
+            })
+    
+    return errors
+
+def detect_z_score_outliers(lines_data, threshold=Z_SCORE_THRESHOLD):
+    """
+    Flag lines with lengths that are extreme statistical outliers (Z > 3).
+    """
+    errors = []
+    
+    lengths = []
+    valid_items = []
+    for item in lines_data:
+        geom = item["geom"]
+        if geom is None or geom.is_empty:
+            continue
+        lengths.append(geom.length)
+        valid_items.append(item)
+    
+    if len(lengths) < 3:
+        return errors
+    
+    mean_len = np.mean(lengths)
+    std_len = np.std(lengths)
+    
+    if std_len == 0:
+        return errors
+    
+    for i, length in enumerate(lengths):
+        z_score = abs((length - mean_len) / std_len)
+        if z_score > threshold:
+            item = valid_items[i]
+            errors.append({
+                "id": f"zscore-{item['line_no']}",
+                "type": "Statistical Outlier (Z-Score)",
+                "geometry_index": item["id"],
+                "line_number": item["line_no"],
+                "location": f"{item['geom'].centroid.x:.6f}, {item['geom'].centroid.y:.6f}",
+                "severity": "LOW",
+                "description": f"Line {item['line_no']} length ({length:.2f}m) is a statistical outlier (Z={z_score:.2f}).",
+                "wkt": item["geom"].wkt
+            })
+    
+    return errors
+
+# --------------------------------------------------
+# Geometry Rules
+# --------------------------------------------------
 
 # --------------------------------------------------
 # Geometry Rules
@@ -527,9 +638,101 @@ async def run_geometry_qa(uploaded_file):
                     "wkt": g.wkt
                 })
 
-        # 3. Topology Checks
+        # 3. Topology Checks (Rule-Based)
         errors.extend(find_dangles(lines_data))
         errors.extend(find_short_lines(lines_data))
+
+        # 4. ML-Based Anomaly Detection
+        errors.extend(detect_anomalies_isolation_forest(lines_data))
+        errors.extend(detect_z_score_outliers(lines_data))
+
+        # 5. Additional Geometry Type Checks (NEW - Comprehensive)
+        for item in lines_data:
+            g = item["geom"]
+            if g is None or g.is_empty:
+                continue
+            
+            geom_type = g.geom_type
+            
+            # Polygon-specific checks
+            if geom_type in ['Polygon', 'MultiPolygon']:
+                # Check for self-intersection (already caught by is_valid, but let's be explicit)
+                if not g.is_simple:
+                    errors.append({
+                        "id": f"selfintersect-{item['line_no']}",
+                        "type": "Self-Intersecting Polygon",
+                        "geometry_index": item["id"],
+                        "line_number": item['line_no'],
+                        "location": f"{g.centroid.x:.6f}, {g.centroid.y:.6f}",
+                        "severity": "HIGH",
+                        "description": f"Line {item['line_no']}: Polygon has self-intersecting boundaries.",
+                        "wkt": g.wkt
+                    })
+                
+                # Check for very small area (potentially collapsed polygon)
+                if g.area < 0.01:
+                    errors.append({
+                        "id": f"smallarea-{item['line_no']}",
+                        "type": "Tiny Polygon",
+                        "geometry_index": item["id"],
+                        "line_number": item['line_no'],
+                        "location": f"{g.centroid.x:.6f}, {g.centroid.y:.6f}",
+                        "severity": "MEDIUM",
+                        "description": f"Line {item['line_no']}: Polygon area is extremely small ({g.area:.6f}).",
+                        "wkt": g.wkt
+                    })
+            
+            # Point-specific checks - detect isolated/duplicate points
+            if geom_type == 'Point':
+                # Check for duplicate points in the dataset
+                for other_item in lines_data:
+                    if other_item["id"] == item["id"]:
+                        continue
+                    other_g = other_item["geom"]
+                    if other_g is None:
+                        continue
+                    if other_g.geom_type == 'Point' and g.equals(other_g):
+                        errors.append({
+                            "id": f"duplicate-{item['line_no']}",
+                            "type": "Duplicate Point",
+                            "geometry_index": item["id"],
+                            "line_number": item['line_no'],
+                            "location": f"{g.x:.6f}, {g.y:.6f}",
+                            "severity": "LOW",
+                            "description": f"Line {item['line_no']}: Duplicate point detected.",
+                            "wkt": g.wkt
+                        })
+                        break  # Only report once
+            
+            # Check for 3D coordinates (Z values) - informational
+            try:
+                coords = list(g.coords) if hasattr(g, 'coords') else []
+                if coords and len(coords[0]) > 2:
+                    errors.append({
+                        "id": f"3d-{item['line_no']}",
+                        "type": "3D Geometry (Z/M)",
+                        "geometry_index": item["id"],
+                        "line_number": item['line_no'],
+                        "location": f"{g.centroid.x:.6f}, {g.centroid.y:.6f}",
+                        "severity": "INFO",
+                        "description": f"Line {item['line_no']}: Contains Z or M coordinates (3D/4D data).",
+                        "wkt": g.wkt
+                    })
+            except:
+                pass
+            
+            # Check for complex/curved geometry types (informational)
+            if geom_type in ['CircularString', 'CompoundCurve', 'CurvePolygon', 'MultiCurve', 'MultiSurface']:
+                errors.append({
+                    "id": f"curved-{item['line_no']}",
+                    "type": "Curved Geometry",
+                    "geometry_index": item["id"],
+                    "line_number": item['line_no'],
+                    "location": "N/A",
+                    "severity": "INFO",
+                    "description": f"Line {item['line_no']}: Advanced curved geometry type ({geom_type}).",
+                    "wkt": g.wkt
+                })
 
         # 4. Visualization
         fig, ax = plt.subplots(figsize=(8, 8))

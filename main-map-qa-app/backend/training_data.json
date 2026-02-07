@@ -1,0 +1,20 @@
+[
+    {
+        "error_type": "Dangle",
+        "context": "Gap less than 0.5m",
+        "user_fix_description": "Snap endpoint to nearest vertex",
+        "fix_code_template": "# line.coords[-1] = (nearest_x, nearest_y)"
+    },
+    {
+        "error_type": "Dangle",
+        "context": "Gap between 0.5m and 2m",
+        "user_fix_description": "Extend line to connect",
+        "fix_code_template": "# Extend line by gap distance towards nearest point"
+    },
+    {
+        "error_type": "Short Line Segment",
+        "context": "Length less than 1m",
+        "user_fix_description": "Delete the segment",
+        "fix_code_template": "# Remove line from collection"
+    }
+]
