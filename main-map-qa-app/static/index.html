@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Map QA Tool</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+
+<h2>Map Quality Assurance Tool</h2>
+
+<label>
+  QA Mode:
+  <select id="mode">
+    <option value="geometry">Geometry-based QA (WKT)</option>
+    <option value="image">Image-based QA</option>
+  </select>
+</label>
+
+<br><br>
+
+<input type="file" id="fileInput">
+<br><br>
+
+<button onclick="runQA()">Run QA</button>
+
+<h3>Results</h3>
+<div id="errors"></div>
+<img id="outputImage" />
+
+<script src="/static/app.js"></script>
+</body>
+</html>
